@@ -1,0 +1,18 @@
+{
+  "name": "boba-tvl",
+  "version": "1.0.0",
+  "description": "Boba network TVL calculation script",
+  "main": "index.js",
+  "license": "AGPL-3.0-or-later",
+  "dependencies": {
+    "dotenv": "^11.0.0",
+    "lodash": "^4.17.21",
+    "moment": "^2.29.1",
+    "node-fetch": "^2.6.1",
+    "web3": "^1.6.1"
+  },
+  "files": [
+    "/src/**/*.js"
+  ],
+  "bin": "index.js"
+}
