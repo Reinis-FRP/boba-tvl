@@ -19,6 +19,7 @@ const argv = require("minimist")(process.argv.slice(), {
   number: [
     "from",
     "to",
+    "interval",
   ]
 });
 
@@ -138,6 +139,41 @@ function getCoingeckoPriceAt(tokenPrices, tokenAddress, timestamp) {
   }
 }
 
+// Add starting balances for the interval.
+function addFirstBalance(tokenBalances, startTimestamp) {
+  const firstBalanceIndex = tokenBalances.findIndex((balanceItem) => {
+    return balanceItem.timestamp > startTimestamp;
+  });
+  let firstBalanceItem = {timestamp: startTimestamp};
+  if (firstBalanceIndex == -1) {
+    firstBalanceItem = {...tokenBalances.slice(-1)[0], ...firstBalanceItem};
+    tokenBalances.push(firstBalanceItem);
+  } else if (firstBalanceIndex == 0) {
+    firstBalanceItem = {...{tokenBalance: 0, value: 0}, ...firstBalanceItem};
+    tokenBalances.splice(firstBalanceIndex, 0, firstBalanceItem);
+  } else {
+    firstBalanceItem = {...tokenBalances[firstBalanceIndex - 1], ...firstBalanceItem};
+    tokenBalances.splice(firstBalanceIndex, 0, firstBalanceItem);
+  }
+}
+
+// Calculate TWAP from token balances for the time range.
+function calculateTwap(tokenBalances, startTimestamp, endTimestamp) {
+  let cumValue = 0;
+  const selectedBalances = tokenBalances.filter((balanceItem) => {
+    return balanceItem.timestamp && balanceItem.timestamp >= startTimestamp && balanceItem.timestamp < endTimestamp;
+  });
+  selectedBalances.forEach((balanceItem, balanceIndex) => {
+    // Weight value by time difference till next value,
+    // except for last entry weight by time till end of evaluation timestamp.
+    const timePeriod = (balanceIndex < selectedBalances.length - 1) ?
+      selectedBalances[balanceIndex + 1].timestamp - balanceItem.timestamp :
+      endTimestamp - balanceItem.timestamp;
+    cumValue += selectedBalances[balanceIndex].value * timePeriod;
+  });
+  return cumValue / (endTimestamp - startTimestamp);
+}
+
 async function main() {
   // If user did not specify TVL measurement an identifier default to usd.
   const tvlCurrency = argv.ccy ? argv.ccy : "usd";
@@ -147,6 +183,10 @@ async function main() {
   const fromTimestamp = argv.from ? argv.from : toTimestamp - 86400;
 
   if (fromTimestamp > toTimestamp) throw "--from timestamp cannot be higher than --to timestamp";
+
+  // If user did not specify interval default to 1h for less than 24h range and 1d for larger range.
+  const interval = argv.interval ? argv.interval :
+    (toTimestamp - fromTimestamp > 86400 ? 86400 : 3600);
 
   // Determine start and end block numbers for the evaluation range.
   const blockFinder = new BlockFinder(web3.eth.getBlock);
@@ -193,20 +233,7 @@ async function main() {
 
   // Add balances exactly at start timestamp.
   for (const tokenAddress in balances) {
-    const firstBalanceIndex = balances[tokenAddress].findIndex((balanceItem) => {
-      return balanceItem.timestamp > fromTimestamp;
-    });
-    const firstBalanceItem = {timestamp: fromTimestamp};
-    if (firstBalanceIndex == -1) {
-      firstBalanceItem.tokenBalance = balances[tokenAddress].slice(-1)[0].tokenBalance;
-      balances[tokenAddress].push(firstBalanceItem);
-    } else if (firstBalanceIndex == 0) {
-      firstBalanceItem.tokenBalance = 0;
-      balances[tokenAddress].splice(firstBalanceIndex, 0, firstBalanceItem);
-    } else {
-      firstBalanceItem.tokenBalance = balances[tokenAddress][firstBalanceIndex - 1].tokenBalance;
-      balances[tokenAddress].splice(firstBalanceIndex, 0, firstBalanceItem);
-    }
+    addFirstBalance(balances[tokenAddress], fromTimestamp);
   }
 
   // Get token prices.
@@ -284,20 +311,15 @@ async function main() {
     }
   });
 
-  // Calculate TWAP for each asset and aggregate.
+  // Calculate TWAP for each asset, including for aggregate.
   const twaps = {};
   for (const tokenAddress in balances) {
-    let cumValue = 0;
-    balances[tokenAddress].forEach((balanceItem, balanceIndex) => {
-      if (!balanceItem.timestamp || balanceItem.timestamp < fromTimestamp) return;
-      // Weight value by time difference till next value,
-      // except for last entry weight by time till end of evaluation timestamp.
-      const timePeriod = (balanceIndex < balances[tokenAddress].length - 1) ?
-        balances[tokenAddress][balanceIndex + 1].timestamp - balanceItem.timestamp :
-        toTimestamp - balanceItem.timestamp;
-      cumValue += balances[tokenAddress][balanceIndex].value * timePeriod;
-    });
-    twaps[tokenAddress] = cumValue / (toTimestamp - fromTimestamp);
+    twaps[tokenAddress] = {};
+    for (startTimestamp = fromTimestamp; startTimestamp < toTimestamp; startTimestamp += interval) {
+      addFirstBalance(balances[tokenAddress], startTimestamp);
+      twaps[tokenAddress][startTimestamp] = calculateTwap(balances[tokenAddress], startTimestamp, startTimestamp + interval);
+    }
+    twaps[tokenAddress]["All"] = calculateTwap(balances[tokenAddress], fromTimestamp, toTimestamp);
   }
 
   // Output time series TVL as CSV for charting.
@@ -306,15 +328,24 @@ async function main() {
     console.log(balanceItem.timestamp, balanceItem.value);
   });
 
+  // Output TWAP for intervals as CSV for charting.
+  console.log("\nintervalStart", "TVL_" + tvlCurrency);
+  Object.keys(twaps["Total"]).forEach((intervalStart) => {
+    if (intervalStart != "All") {
+      console.log(intervalStart, twaps["Total"][intervalStart]);
+    }
+  });
+
   // Output resulting TWAP.
   console.log("\nTWAP for period from " +
     moment.unix(fromTimestamp).format("DD-MM-YYYY HH:mm:ss") +
     " to " +
     moment.unix(toTimestamp).format("DD-MM-YYYY HH:mm:ss") +
     " UTC: " +
-    twaps["Total"] +
+    twaps["Total"]["All"] +
     " " +
     tvlCurrency);
+
 }
 
 main().then(
