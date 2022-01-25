@@ -11,6 +11,7 @@ const web3 = new Web3(process.env.NODE_URL_CHAIN_1);
 const { fromWei, toBN, toWei } = web3.utils;
 
 const earliestBlock = 13012048;  // No need to look for events before L1StandardBridge was deployed.
+const dateFormat = "YYYY-MM-DD HH:mm:ss";
 
 const argv = require("minimist")(process.argv.slice(), {
   string: [
@@ -338,9 +339,9 @@ async function main() {
 
   // Output resulting TWAP.
   console.log("\nTWAP for period from " +
-    moment.unix(fromTimestamp).format("DD-MM-YYYY HH:mm:ss") +
+    moment.unix(fromTimestamp).utc().format(dateFormat) +
     " to " +
-    moment.unix(toTimestamp).format("DD-MM-YYYY HH:mm:ss") +
+    moment.unix(toTimestamp).utc().format(dateFormat) +
     " UTC: " +
     twaps["Total"]["All"] +
     " " +
