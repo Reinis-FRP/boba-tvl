@@ -7,6 +7,8 @@ const lodash=require('lodash');
 const moment = require('moment');
 const {BlockFinder} = require('./src/BlockFinder');
 const {contracts} = require('./src/Contracts');
+const debug = require('debug')('boba-tvl');
+
 const web3 = new Web3(process.env.NODE_URL_CHAIN_1);
 const { fromWei, toBN, toWei } = web3.utils;
 
@@ -97,7 +99,15 @@ async function getTokenDecimals(tokenAddress) {
     return 18;
   }
   const tokenContract = new web3.eth.Contract(contracts.ERC20.abi, tokenAddress);
-  const tokenDecimals = await tokenContract.methods.decimals().call();
+  let tokenDecimals;
+  try {
+    tokenDecimals = await tokenContract.methods.decimals().call();
+  }
+  catch (err) {
+    debug(`error: failed to get decimals for token at ${tokenAddress}`, err);
+    throw err;
+  }
+
   return tokenDecimals;
 }
 
@@ -175,6 +185,11 @@ function calculateTwap(tokenBalances, startTimestamp, endTimestamp) {
   return cumValue / (endTimestamp - startTimestamp);
 }
 
+const ignoredTokens = new Set([
+  "0x8415A9CB9991B94F56dD83d6484FfbB25BC61E6d", // missing decimal() function, no CoinGecko feed
+  "0xE2975f6A95735BdcaD5e39296d37cab6470DacC8", // fake Boba token, no CoinGecko feed
+]);
+
 async function main() {
   // If user did not specify TVL measurement an identifier default to usd.
   const tvlCurrency = argv.ccy ? argv.ccy : "usd";
@@ -190,12 +205,14 @@ async function main() {
     (toTimestamp - fromTimestamp > 86400 ? 86400 : 3600);
 
   // Determine start and end block numbers for the evaluation range.
+  debug('determining block ranges...')
   const blockFinder = new BlockFinder(web3.eth.getBlock);
   const fromBlock = (await blockFinder.getBlockForTimestamp(fromTimestamp)).number;
   const toBlock = (await blockFinder.getBlockForTimestamp(toTimestamp)).number;
   if (toBlock < earliestBlock) throw "--to timestamp cannot be earlier than L1StandardBridge deployment";
 
   // Get all bridging events from Boba gateway on L1.
+  debug('fetching all raw bridge transactions...')
   const l1StandardBridge = new web3.eth.Contract(contracts.L1StandardBridge.abi, contracts.L1StandardBridge.address);
   const rawBridgeTransactions = (await Promise.all([
     getEthDepositInitiated(l1StandardBridge, toBlock),
@@ -206,19 +223,27 @@ async function main() {
   const sortedBridgeTransactions = lodash.sortBy(rawBridgeTransactions, ["blockNumber"]);
 
   // Calculate balances for each token at each available block number.
+  debug('calculating raw balances for each token...')
   const balances = {};
   sortedBridgeTransactions.forEach((transaction) => {
-    if (balances[transaction.token]) {
-      balances[transaction.token].push({
+    const tokenAddress = transaction.token;
+    if (ignoredTokens.has(tokenAddress)) {
+      debug(`ignoring token at ${tokenAddress}`);
+      return;
+    }
+
+    if (balances[tokenAddress]) {
+      balances[tokenAddress].push({
         blockNumber: transaction.blockNumber,
-        rawBalance: balances[transaction.token].slice(-1)[0].rawBalance.add(transaction.netAmount)
+        rawBalance: balances[tokenAddress].slice(-1)[0].rawBalance.add(transaction.netAmount)
       });
     } else {
-      balances[transaction.token] = [{blockNumber: transaction.blockNumber, rawBalance: transaction.netAmount}];
+      balances[tokenAddress] = [{blockNumber: transaction.blockNumber, rawBalance: transaction.netAmount}];
     }
   });
 
   // Add timestamps to asset balances within requested range. Also calculate scaled down balances from token decimals.
+  debug('scale token balances to decimals, add timestamps for token balances...')
   for (const tokenAddress in balances) {
     const tokenDecimals = await getTokenDecimals(tokenAddress);
     for (balanceItem of balances[tokenAddress]) {
@@ -238,6 +263,7 @@ async function main() {
   }
 
   // Get token prices.
+  debug(`fetching coingecko prices for ${Object.keys(balances).length} coins...`)
   const tokenPrices = {};
   await Promise.all(Object.keys(balances).map(async (tokenAddress) => {
     // Request prices for at least 30 day range in order to get hourly granularity.
@@ -254,6 +280,7 @@ async function main() {
   }));
 
   // Calculate TVL based on CoinGecko for each timestamp when asset balance has changed within requested range.
+  debug(`compute TVL for each coin...`)
   for (const tokenAddress in balances) {
     for (balanceItem of balances[tokenAddress]) {
       balanceItem.price = getCoingeckoPriceAt(tokenPrices, tokenAddress, balanceItem.timestamp);
